@@ -1,6 +1,6 @@
 -- =====================================================================
--- ULTIMATE VOID DROP & WALL BYPASS ENGINE
--- Combines HipHeight Sink, Outward Nudge, Waypoint Override & Spin Slip
+-- DIRECT MOB TELEPORT ENGINE (VOID TP & BRING TO ME)
+-- Bypasses walls/floors by forcing mob CFrames directly to Void or Player
 -- =====================================================================
 
 local Services = {
@@ -12,17 +12,18 @@ local Services = {
 local LocalPlayer = Services.Players.LocalPlayer
 
 -- Configuration
-getgenv().VoidDropConfig = getgenv().VoidDropConfig or {
-    Enabled = false,                 -- Master Toggle
-    PushForce = 2.5,                 -- Studs shifted per frame
-    SinkDepth = -5,                  -- HipHeight offset to sink under wall bounds
-    DropRange = 350,                 -- Scan radius in studs
-    ApplySpinFling = true,           -- Rotational spin to slip along corners
-    IgnorePlayers = true,            -- Ignore real player models
-    CustomFolderName = ""            -- Workspace folder override
+getgenv().DirectTPConfig = getgenv().DirectTPConfig or {
+    Mode = "None",                   -- "Void", "Bring", or "None"
+    VoidYLevel = -300,               -- Y-Coordinate for void death
+    BringOffset = 4,                 -- Distance in front of player
+    ScanRadius = 350,                -- Search radius in studs
+    PulseInterval = 0.1,             -- TP refresh speed in seconds
+    IgnorePlayers = true,            -- Ignore real player characters
+    CustomFolderName = ""            -- Custom Workspace folder override
 }
 
-local HeartbeatConnection = nil
+local TPLoopConnection = nil
+local lastTP = 0
 
 -- Multi-Mirror Safe Rayfield Loader
 local Rayfield = nil
@@ -48,7 +49,7 @@ if not Rayfield then return end
 local function isValidMob(model)
     if not model or not model:IsA("Model") then return false end
 
-    if getgenv().VoidDropConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
+    if getgenv().DirectTPConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
         return false
     end
 
@@ -61,9 +62,13 @@ local function isValidMob(model)
     return true, rootPart, humanoid
 end
 
--- Multi-Bypass Frame Processor
-local function processVoidDrop()
-    if not getgenv().VoidDropConfig.Enabled then return end
+-- Teleport Logic Execution
+local function processTeleports()
+    local mode = getgenv().DirectTPConfig.Mode
+    if mode == "None" then return end
+
+    if tick() - lastTP < getgenv().DirectTPConfig.PulseInterval then return end
+    lastTP = tick()
 
     local character = LocalPlayer.Character
     local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
@@ -72,154 +77,132 @@ local function processVoidDrop()
     local playerPos = playerRoot.Position
     local searchContainer = Services.Workspace
 
-    if getgenv().VoidDropConfig.CustomFolderName ~= "" then
-        local folder = Services.Workspace:FindFirstChild(getgenv().VoidDropConfig.CustomFolderName)
+    if getgenv().DirectTPConfig.CustomFolderName ~= "" then
+        local folder = Services.Workspace:FindFirstChild(getgenv().DirectTPConfig.CustomFolderName)
         if folder then searchContainer = folder end
     end
 
-    local function applyBypassAndPush(mobModel, mobRoot, humanoid)
+    -- Target calculation based on active mode
+    local function executeTP(mobModel, mobRoot)
         pcall(function()
             local dist = (mobRoot.Position - playerPos).Magnitude
-            if dist <= getgenv().VoidDropConfig.DropRange then
+            if dist <= getgenv().DirectTPConfig.ScanRadius then
                 
-                -- 1. Sink HipHeight below floor/wall colliders
-                humanoid.HipHeight = getgenv().VoidDropConfig.SinkDepth
-
-                -- 2. Calculate outward vector pointing away from player
-                local pushDir = (mobRoot.Position - playerPos).Unit
-                if pushDir.Magnitude == 0 or pushDir ~= pushDir then
-                    pushDir = playerRoot.CFrame.LookVector
+                local targetCFrame
+                if mode == "Void" then
+                    -- Teleport straight down into the kill zone below current X/Z position
+                    targetCFrame = CFrame.new(mobRoot.Position.X, getgenv().DirectTPConfig.VoidYLevel, mobRoot.Position.Z)
+                elseif mode == "Bring" then
+                    -- Teleport right in front of the player
+                    targetCFrame = playerRoot.CFrame * CFrame.new(0, 0, -getgenv().DirectTPConfig.BringOffset)
                 end
 
-                -- 3. Step CFrame past wall bounds incrementally
-                local targetPos = mobRoot.Position + (pushDir * getgenv().VoidDropConfig.PushForce)
-                mobRoot.CFrame = CFrame.new(targetPos, targetPos + pushDir)
-
-                -- 4. Spoof Humanoid pathfinding target out into the void
-                humanoid:MoveTo(mobRoot.Position + (pushDir * 100))
-
-                -- 5. Strip local part collision
-                for _, part in ipairs(mobModel:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        part.CanCollide = false
-                        part.CanTouch = false
+                if targetCFrame then
+                    if mobModel.PrimaryPart then
+                        mobModel:PivotTo(targetCFrame)
+                    else
+                        mobRoot.CFrame = targetCFrame
                     end
-                end
 
-                -- 6. Unlock physics states and apply downward + outward velocity
-                humanoid.PlatformStand = true
-                humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-
-                if getgenv().VoidDropConfig.ApplySpinFling then
-                    mobRoot.AssemblyAngularVelocity = Vector3.new(0, 500, 0)
+                    -- Zero out velocity to prevent momentum rubberbanding
+                    mobRoot.AssemblyLinearVelocity = Vector3.zero
+                    mobRoot.AssemblyAngularVelocity = Vector3.zero
                 end
-                mobRoot.AssemblyLinearVelocity = (pushDir * 40) + Vector3.new(0, -60, 0)
             end
         end)
     end
 
     for _, obj in ipairs(searchContainer:GetChildren()) do
-        local valid, mobRoot, humanoid = isValidMob(obj)
+        local valid, mobRoot = isValidMob(obj)
         if valid then
-            applyBypassAndPush(obj, mobRoot, humanoid)
+            executeTP(obj, mobRoot)
         elseif obj:IsA("Folder") then
             for _, nestedObj in ipairs(obj:GetChildren()) do
-                local nestedValid, nestedRoot, nestedHumanoid = isValidMob(nestedObj)
+                local nestedValid, nestedRoot = isValidMob(nestedObj)
                 if nestedValid then
-                    applyBypassAndPush(nestedObj, nestedRoot, nestedHumanoid)
+                    executeTP(nestedObj, nestedRoot)
                 end
             end
         end
     end
 end
 
--- Engine State Manager
-local function setEngineState(state)
-    getgenv().VoidDropConfig.Enabled = state
-
-    if HeartbeatConnection then
-        HeartbeatConnection:Disconnect()
-        HeartbeatConnection = nil
+-- State Connection Handler
+local function updateLoopState()
+    if TPLoopConnection then
+        TPLoopConnection:Disconnect()
+        TPLoopConnection = nil
     end
 
-    if state then
-        HeartbeatConnection = Services.RunService.Heartbeat:Connect(processVoidDrop)
-    else
-        -- Restore mob states on disable
-        pcall(function()
-            local searchContainer = Services.Workspace
-            if getgenv().VoidDropConfig.CustomFolderName ~= "" then
-                local folder = Services.Workspace:FindFirstChild(getgenv().VoidDropConfig.CustomFolderName)
-                if folder then searchContainer = folder end
-            end
-
-            for _, obj in ipairs(searchContainer:GetChildren()) do
-                local valid, _, humanoid = isValidMob(obj)
-                if valid and humanoid then
-                    humanoid.HipHeight = 2
-                    humanoid.PlatformStand = false
-                    humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-                end
-            end
-        end)
+    if getgenv().DirectTPConfig.Mode ~= "None" then
+        TPLoopConnection = Services.RunService.Heartbeat:Connect(processTeleports)
     end
 end
 
--- Rayfield Window Interface
+-- ---------------------------------------------------------------------
+-- Rayfield UI Setup
+-- ---------------------------------------------------------------------
 local Window = Rayfield:CreateWindow({
-   Name = "Ultimate Void Drop Engine",
-   LoadingTitle = "Loading Multi-Bypass Engine...",
+   Name = "Direct Mob Teleport Engine",
+   LoadingTitle = "Loading Teleport Engine...",
    LoadingSubtitle = "by Keith",
    ConfigurationSaving = { Enabled = false },
    Discord = { Enabled = false },
    KeySystem = false
 })
 
-local MainTab = Window:CreateTab("Wall Bypass & Drop", 4483362458)
+local MainTab = Window:CreateTab("Teleport Modes", 4483362458)
 
-MainTab:CreateSection("Main Controls")
+MainTab:CreateSection("Mode Selection")
 
-MainTab:CreateToggle({
-   Name = "Enable Multi-Bypass Void Drop",
-   CurrentValue = false,
-   Flag = "VoidDropToggle",
-   Callback = function(Value)
-      setEngineState(Value)
+MainTab:CreateDropdown({
+   Name = "Active Teleport Mode",
+   Options = {"None", "Teleport to Void", "Bring to Player"},
+   CurrentOption = {"None"},
+   MultipleOptions = false,
+   Flag = "ModeDropdown",
+   Callback = function(Option)
+      local selected = Option[1] or Option
+      if selected == "Teleport to Void" then
+         getgenv().DirectTPConfig.Mode = "Void"
+      elseif selected == "Bring to Player" then
+         getgenv().DirectTPConfig.Mode = "Bring"
+      else
+         getgenv().DirectTPConfig.Mode = "None"
+      end
+      updateLoopState()
    end,
 })
 
+MainTab:CreateSection("Void Mode Settings")
+
 MainTab:CreateSlider({
-   Name = "Wall Push Speed (Studs/Frame)",
-   Range = {1, 10},
-   Increment = 0.5,
+   Name = "Void Y-Height Level",
+   Range = {-1000, -50},
+   Increment = 25,
+   Suffix = "Y",
+   CurrentValue = -300,
+   Flag = "VoidYSlider",
+   Callback = function(Value)
+      getgenv().DirectTPConfig.VoidYLevel = Value
+   end,
+})
+
+MainTab:CreateSection("Bring Mode Settings")
+
+MainTab:CreateSlider({
+   Name = "Bring Distance (In Front of You)",
+   Range = {2, 15},
+   Increment = 1,
    Suffix = "Studs",
-   CurrentValue = 2.5,
-   Flag = "PushForceSlider",
+   CurrentValue = 4,
+   Flag = "BringOffsetSlider",
    Callback = function(Value)
-      getgenv().VoidDropConfig.PushForce = Value
+      getgenv().DirectTPConfig.BringOffset = Value
    end,
 })
 
-MainTab:CreateSlider({
-   Name = "Wall Sink Depth (HipHeight)",
-   Range = {-10, 0},
-   Increment = 0.5,
-   Suffix = "Depth",
-   CurrentValue = -5,
-   Flag = "SinkDepthSlider",
-   Callback = function(Value)
-      getgenv().VoidDropConfig.SinkDepth = Value
-   end,
-})
-
-MainTab:CreateToggle({
-   Name = "Enable Angular Spin Slip",
-   CurrentValue = true,
-   Flag = "SpinFlingToggle",
-   Callback = function(Value)
-      getgenv().VoidDropConfig.ApplySpinFling = Value
-   end,
-})
+MainTab:CreateSection("General Settings")
 
 MainTab:CreateSlider({
    Name = "Scan Radius",
@@ -229,18 +212,16 @@ MainTab:CreateSlider({
    CurrentValue = 350,
    Flag = "RadiusSlider",
    Callback = function(Value)
-      getgenv().VoidDropConfig.DropRange = Value
+      getgenv().DirectTPConfig.ScanRadius = Value
    end,
 })
 
-MainTab:CreateSection("Target Settings")
-
 MainTab:CreateInput({
-   Name = "Custom Folder Name",
+   Name = "Custom Workspace Folder",
    PlaceholderText = "e.g., Mobs, Enemies (Leave empty for Workspace)",
    RemoveTextOnFocusLost = false,
    Callback = function(Text)
-      getgenv().VoidDropConfig.CustomFolderName = string.gsub(Text, "%s+", "")
+      getgenv().DirectTPConfig.CustomFolderName = string.gsub(Text, "%s+", "")
    end,
 })
 
@@ -249,10 +230,11 @@ MainTab:CreateSection("Script Controls")
 MainTab:CreateButton({
    Name = "Unload / Destroy Script",
    Callback = function()
-      setEngineState(false)
+      getgenv().DirectTPConfig.Mode = "None"
+      updateLoopState()
       Rayfield:Notify({
-         Title = "Engine Unloaded",
-         Content = "Restored mob states and closed UI.",
+         Title = "Script Unloaded",
+         Content = "Disabled loops & destroyed UI.",
          Duration = 3,
       })
       task.wait(0.3)
@@ -261,7 +243,7 @@ MainTab:CreateButton({
 })
 
 Rayfield:Notify({
-   Title = "Ultimate Engine Loaded",
-   Content = "Toggle ON and lure mobs near the wall boundary!",
+   Title = "Teleport Engine Loaded",
+   Content = "Select 'Teleport to Void' or 'Bring to Player' from the dropdown!",
    Duration = 4,
 })
