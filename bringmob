@@ -1,6 +1,6 @@
 -- =====================================================================
--- MOB NOCLIP & VOID DROP ENGINE + RAYFIELD UI (WITH UNLOAD FEATURE)
--- Applies continuous NoClip (Stepped loop) to force mobs through floor
+-- PURE MOB NOCLIP ENGINE (LURE & DROP EDITION)
+-- Disables collisions on mobs every Stepped frame so they fall off edges
 -- =====================================================================
 
 local Services = {
@@ -11,20 +11,17 @@ local Services = {
 
 local LocalPlayer = Services.Players.LocalPlayer
 
--- Configuration
-getgenv().BringMobsConfig = getgenv().BringMobsConfig or {
-    NoclipEnabled = false,           -- Master NoClip Toggle
-    PushDownward = true,             -- Applies downward physics force
-    BringDistance = 300,             -- Radius in studs
+-- Configuration Matrix
+getgenv().MobNoclipConfig = getgenv().MobNoclipConfig or {
+    Enabled = false,                 -- Toggle state
+    Distance = 300,                  -- Distance radius around player
     IgnorePlayers = true,            -- Ignore player characters
-    CustomFolderName = "",           -- Target folder in Workspace
-    Whitelist = {},                  -- Name whitelist
-    Blacklist = {}                   -- Name blacklist
+    CustomFolderName = ""            -- Custom Workspace folder if mobs are stored separately
 }
 
-local NoclipLoopConnection = nil
+local NoclipConnection = nil
 
--- Multi-Mirror Rayfield Loader
+-- Multi-Mirror Safe Rayfield Loader
 local Rayfield = nil
 local rayfieldURLs = {
     "https://raw.githubusercontent.com/shlexware/Rayfield/main/source",
@@ -44,11 +41,12 @@ end
 
 if not Rayfield then return end
 
--- Validate Mob Function
+-- Validate NPC / Mob
 local function isValidMob(model)
     if not model or not model:IsA("Model") then return false end
 
-    if getgenv().BringMobsConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
+    -- Do not target real players
+    if getgenv().MobNoclipConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
         return false
     end
 
@@ -62,95 +60,67 @@ local function isValidMob(model)
         return false
     end
 
-    local modelName = string.lower(model.Name)
-
-    -- Whitelist Check
-    local whitelist = getgenv().BringMobsConfig.Whitelist
-    if #whitelist > 0 then
-        local matched = false
-        for _, name in ipairs(whitelist) do
-            if string.find(modelName, string.lower(name)) then
-                matched = true
-                break
-            end
-        end
-        if not matched then return false end
-    end
-
-    -- Blacklist Check
-    local blacklist = getgenv().BringMobsConfig.Blacklist
-    if #blacklist > 0 then
-        for _, name in ipairs(blacklist) do
-            if string.find(modelName, string.lower(name)) then
-                return false
-            end
-        end
-    end
-
-    return true, rootPart, humanoid
+    return true, rootPart
 end
 
--- Process NoClip on Stepped (Executes BEFORE physics step)
+-- Continuous NoClip Core Engine
 local function processMobNoclip()
-    if not getgenv().BringMobsConfig.NoclipEnabled then return end
+    if not getgenv().MobNoclipConfig.Enabled then return end
 
     local character = LocalPlayer.Character
     local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
     if not playerRoot then return end
 
+    local playerPos = playerRoot.Position
     local searchContainer = Services.Workspace
-    if getgenv().BringMobsConfig.CustomFolderName ~= "" then
-        local foundFolder = Services.Workspace:FindFirstChild(getgenv().BringMobsConfig.CustomFolderName)
-        if foundFolder then searchContainer = foundFolder end
+
+    if getgenv().MobNoclipConfig.CustomFolderName ~= "" then
+        local folder = Services.Workspace:FindFirstChild(getgenv().MobNoclipConfig.CustomFolderName)
+        if folder then searchContainer = folder end
     end
 
-    local function applyNoclipToMob(mobModel, mobRoot)
+    local function applyNoclipToModel(mobModel, mobRoot)
         pcall(function()
-            local dist = (mobRoot.Position - playerRoot.Position).Magnitude
-            if dist <= getgenv().BringMobsConfig.BringDistance then
-                
-                -- Force CanCollide = false on ALL parts of the mob model
+            local dist = (mobRoot.Position - playerPos).Magnitude
+            if dist <= getgenv().MobNoclipConfig.Distance then
+                -- Disable collisions on ALL descendant parts of the mob
                 for _, part in ipairs(mobModel:GetDescendants()) do
                     if part:IsA("BasePart") then
                         part.CanCollide = false
                     end
                 end
-
-                -- Optional downward force to accelerate falling through floor
-                if getgenv().BringMobsConfig.PushDownward then
-                    mobRoot.AssemblyLinearVelocity = Vector3.new(0, -50, 0)
-                end
             end
         end)
     end
 
+    -- Process workspace objects
     for _, obj in ipairs(searchContainer:GetChildren()) do
         local valid, mobRoot = isValidMob(obj)
         if valid then
-            applyNoclipToMob(obj, mobRoot)
+            applyNoclipToModel(obj, mobRoot)
         elseif obj:IsA("Folder") then
             for _, nestedObj in ipairs(obj:GetChildren()) do
                 local nestedValid, nestedRoot = isValidMob(nestedObj)
                 if nestedValid then
-                    applyNoclipToMob(nestedObj, nestedRoot)
+                    applyNoclipToModel(nestedObj, nestedRoot)
                 end
             end
         end
     end
 end
 
--- Toggle Connection Engine
+-- Enable / Disable Connection Handler
 local function setNoclipState(state)
-    getgenv().BringMobsConfig.NoclipEnabled = state
+    getgenv().MobNoclipConfig.Enabled = state
 
-    if NoclipLoopConnection then
-        NoclipLoopConnection:Disconnect()
-        NoclipLoopConnection = nil
+    if NoclipConnection then
+        NoclipConnection:Disconnect()
+        NoclipConnection = nil
     end
 
     if state then
-        -- MUST use Stepped so collision state is overridden right before physics step
-        NoclipLoopConnection = Services.RunService.Stepped:Connect(processMobNoclip)
+        -- RunService.Stepped runs right BEFORE physics calculation every frame
+        NoclipConnection = Services.RunService.Stepped:Connect(processMobNoclip)
     end
 end
 
@@ -166,12 +136,12 @@ local Window = Rayfield:CreateWindow({
    KeySystem = false
 })
 
-local CombatTab = Window:CreateTab("Mob NoClip", 4483362458)
+local MainTab = Window:CreateTab("Lure & Drop", 4483362458)
 
-CombatTab:CreateSection("Main Controls")
+MainTab:CreateSection("Main Controls")
 
-CombatTab:CreateToggle({
-   Name = "Enable Mob NoClip (Fall Through Map)",
+MainTab:CreateToggle({
+   Name = "Enable Mob NoClip",
    CurrentValue = false,
    Flag = "MobNoclipToggle",
    Callback = function(Value)
@@ -179,45 +149,38 @@ CombatTab:CreateToggle({
    end,
 })
 
-CombatTab:CreateToggle({
-   Name = "Push Downward Velocity",
-   CurrentValue = true,
-   Flag = "PushDownwardToggle",
-   Callback = function(Value)
-      getgenv().BringMobsConfig.PushDownward = Value
-   end,
-})
-
-CombatTab:CreateSlider({
-   Name = "Scan Radius (Studs)",
+MainTab:CreateSlider({
+   Name = "NoClip Range (Studs)",
    Range = {50, 1000},
    Increment = 25,
    Suffix = "Studs",
    CurrentValue = 300,
-   Flag = "ScanRadiusSlider",
+   Flag = "DistanceSlider",
    Callback = function(Value)
-      getgenv().BringMobsConfig.BringDistance = Value
+      getgenv().MobNoclipConfig.Distance = Value
    end,
 })
 
-CombatTab:CreateSection("Target Filters & Unload")
+MainTab:CreateSection("Target Settings")
 
-CombatTab:CreateInput({
-   Name = "Custom Workspace Folder",
+MainTab:CreateInput({
+   Name = "Custom Folder Name",
    PlaceholderText = "e.g., Mobs, Enemies (Leave empty for Workspace)",
    RemoveTextOnFocusLost = false,
    Callback = function(Text)
-      getgenv().BringMobsConfig.CustomFolderName = string.gsub(Text, "%s+", "")
+      getgenv().MobNoclipConfig.CustomFolderName = string.gsub(Text, "%s+", "")
    end,
 })
 
-CombatTab:CreateButton({
+MainTab:CreateSection("Script Controls")
+
+MainTab:CreateButton({
    Name = "Unload / Destroy Script",
    Callback = function()
       setNoclipState(false)
       Rayfield:Notify({
          Title = "Script Unloaded",
-         Content = "Cleaned up background loops & destroyed UI.",
+         Content = "Disabled NoClip connection & destroyed UI.",
          Duration = 3,
       })
       task.wait(0.3)
@@ -226,7 +189,7 @@ CombatTab:CreateButton({
 })
 
 Rayfield:Notify({
-   Title = "Engine Loaded",
-   Content = "Mob NoClip Engine is ready!",
+   Title = "Mob NoClip Ready",
+   Content = "Turn ON 'Enable Mob NoClip' and lead mobs over the edge!",
    Duration = 4,
 })
