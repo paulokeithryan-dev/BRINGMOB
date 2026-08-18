@@ -1,5 +1,6 @@
 -- =====================================================================
--- UNIVERSAL BRING MOBS ENGINE + RAYFIELD UI (STABLE RECON EDITION)
+-- INSTANT GROUND DROP & TP MOBS ENGINE
+-- Raycasts ground level beneath player and teleports mobs onto floor
 -- =====================================================================
 
 local Services = {
@@ -10,26 +11,22 @@ local Services = {
 
 local LocalPlayer = Services.Players.LocalPlayer
 
--- ---------------------------------------------------------------------
--- Configuration State
--- ---------------------------------------------------------------------
+-- Config Matrix
 getgenv().BringMobsConfig = getgenv().BringMobsConfig or {
-    Enabled = false,                 -- Master Toggle
+    Enabled = false,                 -- Toggle state
     BringDistance = 300,             -- Radius in studs
-    UnderDistance = 8,               -- Depth below character in studs
-    DisableCollision = true,         -- Prevents character flinging
-    FreezeHumanoids = false,         -- Stops mob walk animations/movement
-    IgnorePlayers = true,            -- Prevents targeting player characters
-    CustomFolderName = "",           -- Optional folder filter in Workspace
+    UnderOffset = 3,                 -- Height above ground to drop them from
+    TeleportInterval = 0.3,          -- TP pulse frequency (seconds) to allow physics simulation
+    IgnorePlayers = true,            -- Ignore player characters
+    CustomFolderName = "",           -- Target folder in Workspace
     Whitelist = {},                  -- Name whitelist
     Blacklist = {}                   -- Name blacklist
 }
 
 local BringLoopConnection = nil
+local lastTPTime = 0
 
--- ---------------------------------------------------------------------
--- Fail-Safe Rayfield Loader (Multi-Mirror Fallback)
--- ---------------------------------------------------------------------
+-- Multi-Mirror Rayfield Loader
 local Rayfield = nil
 local rayfieldURLs = {
     "https://raw.githubusercontent.com/shlexware/Rayfield/main/source",
@@ -43,36 +40,25 @@ for _, url in ipairs(rayfieldURLs) do
     end)
     if success and result then
         Rayfield = result
-        print("[SUCCESS]: Rayfield UI loaded successfully from " .. url)
         break
-    else
-        warn("[WARNING]: Failed to load Rayfield from " .. url)
     end
 end
 
-if not Rayfield then
-    error("[FATAL ERROR]: Could not load Rayfield UI library from any source! Check executor network settings.")
-    return
-end
+if not Rayfield then return end
 
--- ---------------------------------------------------------------------
--- Core Target Validation & Detection
--- ---------------------------------------------------------------------
+-- Validate Mob
 local function isValidMob(model)
     if not model or not model:IsA("Model") then return false end
 
-    -- Ignore player characters
     if getgenv().BringMobsConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
         return false
     end
 
-    -- Validate Humanoid & Health
     local humanoid = model:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 then
         return false
     end
 
-    -- Identify Root Part
     local rootPart = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
     if not rootPart then
         return false
@@ -80,7 +66,7 @@ local function isValidMob(model)
 
     local modelName = string.lower(model.Name)
 
-    -- Whitelist Check
+    -- Whitelist
     local whitelist = getgenv().BringMobsConfig.Whitelist
     if #whitelist > 0 then
         local matched = false
@@ -93,7 +79,7 @@ local function isValidMob(model)
         if not matched then return false end
     end
 
-    -- Blacklist Check
+    -- Blacklist
     local blacklist = getgenv().BringMobsConfig.Blacklist
     if #blacklist > 0 then
         for _, name in ipairs(blacklist) do
@@ -106,65 +92,74 @@ local function isValidMob(model)
     return true, rootPart, humanoid
 end
 
-local function applyBringUnder(mobModel, mobRoot, humanoid, targetCFrame, playerPosition)
-    pcall(function()
-        local dist = (mobRoot.Position - playerPosition).Magnitude
-        if dist <= getgenv().BringMobsConfig.BringDistance then
-            
-            -- Disable Collision to prevent player flinging
-            if getgenv().BringMobsConfig.DisableCollision then
-                for _, part in ipairs(mobModel:GetChildren()) do
-                    if part:IsA("BasePart") then
-                        part.CanCollide = false
-                    end
-                end
-            end
+-- Raycast ground height directly below player
+local function getGroundTargetCFrame(playerRoot)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
 
-            -- Reset velocity
-            mobRoot.AssemblyLinearVelocity = Vector3.new(0, -5, 0)
-            mobRoot.AssemblyAngularVelocity = Vector3.zero
-
-            -- Freeze Humanoid if enabled
-            if getgenv().BringMobsConfig.FreezeHumanoids and humanoid then
-                humanoid.WalkSpeed = 0
-                humanoid.PlatformStand = true
-            end
-
-            -- Position directly below player
-            mobRoot.CFrame = targetCFrame
-        end
-    end)
+    -- Cast ray 100 studs down from player
+    local rayResult = Services.Workspace:Raycast(playerRoot.Position, Vector3.new(0, -100, 0), rayParams)
+    
+    if rayResult then
+        -- Position slightly above detected floor
+        return CFrame.new(rayResult.Position + Vector3.new(0, getgenv().BringMobsConfig.UnderOffset, 0))
+    else
+        -- Fallback: 5 studs below player root
+        return CFrame.new(playerRoot.Position - Vector3.new(0, 5, 0))
+    end
 end
 
-local function processBringMobs()
+-- Teleport and drop logic
+local function processBringAndDrop()
     if not getgenv().BringMobsConfig.Enabled then return end
+
+    -- Pulse timer: allows physics and gravity to take effect between TPs
+    if tick() - lastTPTime < getgenv().BringMobsConfig.TeleportInterval then return end
+    lastTPTime = tick()
 
     local character = LocalPlayer.Character
     local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
     if not playerRoot then return end
 
-    local playerPos = playerRoot.Position
-    local targetPosition = playerPos - Vector3.new(0, getgenv().BringMobsConfig.UnderDistance, 0)
-    local targetCFrame = CFrame.new(targetPosition)
+    local targetDropCFrame = getGroundTargetCFrame(playerRoot)
 
-    -- Determine Search Root
     local searchContainer = Services.Workspace
-    local customFolderName = getgenv().BringMobsConfig.CustomFolderName
-    if customFolderName ~= "" then
-        local foundFolder = Services.Workspace:FindFirstChild(customFolderName)
+    if getgenv().BringMobsConfig.CustomFolderName ~= "" then
+        local foundFolder = Services.Workspace:FindFirstChild(getgenv().BringMobsConfig.CustomFolderName)
         if foundFolder then searchContainer = foundFolder end
     end
 
-    -- Iterate workspace / target folder safely
+    local function bringMob(mobModel, mobRoot)
+        pcall(function()
+            local dist = (mobRoot.Position - playerRoot.Position).Magnitude
+            if dist <= getgenv().BringMobsConfig.BringDistance then
+                
+                -- Ensure root part has collision for floor interaction
+                mobRoot.CanCollide = true
+
+                -- Apply downward velocity so gravity drops them immediately
+                mobRoot.AssemblyLinearVelocity = Vector3.new(0, -20, 0)
+
+                -- Teleport to ground target position
+                if mobModel.PrimaryPart then
+                    mobModel:PivotTo(targetDropCFrame)
+                else
+                    mobRoot.CFrame = targetDropCFrame
+                end
+            end
+        end)
+    end
+
     for _, obj in ipairs(searchContainer:GetChildren()) do
-        local valid, mobRoot, humanoid = isValidMob(obj)
+        local valid, mobRoot = isValidMob(obj)
         if valid then
-            applyBringUnder(obj, mobRoot, humanoid, targetCFrame, playerPos)
+            bringMob(obj, mobRoot)
         elseif obj:IsA("Folder") then
             for _, nestedObj in ipairs(obj:GetChildren()) do
-                local nestedValid, nestedRoot, nestedHum = isValidMob(nestedObj)
+                local nestedValid, nestedRoot = isValidMob(nestedObj)
                 if nestedValid then
-                    applyBringUnder(nestedObj, nestedRoot, nestedHum, targetCFrame, playerPos)
+                    bringMob(nestedObj, nestedRoot)
                 end
             end
         end
@@ -180,30 +175,24 @@ local function setEngineState(state)
     end
 
     if state then
-        BringLoopConnection = Services.RunService.Heartbeat:Connect(processBringMobs)
+        BringLoopConnection = Services.RunService.Heartbeat:Connect(processBringAndDrop)
     end
 end
 
--- ---------------------------------------------------------------------
--- Rayfield UI Setup
--- ---------------------------------------------------------------------
+-- Rayfield UI Window
 local Window = Rayfield:CreateWindow({
-   Name = "Universal Combat Engine",
-   LoadingTitle = "Loading Mobs Engine...",
+   Name = "Universal Drop Mobs Engine",
+   LoadingTitle = "Loading Engine...",
    LoadingSubtitle = "by Keith",
-   ConfigurationSaving = {
-      Enabled = false
-   },
+   ConfigurationSaving = { Enabled = false },
    Discord = { Enabled = false },
    KeySystem = false
 })
 
 local CombatTab = Window:CreateTab("Bring Mobs", 4483362458)
 
-CombatTab:CreateSection("Main Controls")
-
 CombatTab:CreateToggle({
-   Name = "Bring Mobs Under Player",
+   Name = "Teleport & Drop Mobs Under Player",
    CurrentValue = false,
    Flag = "BringUnderToggle",
    Callback = function(Value)
@@ -213,7 +202,7 @@ CombatTab:CreateToggle({
 
 CombatTab:CreateSlider({
    Name = "Scan Radius (Studs)",
-   Range = {50, 1500},
+   Range = {50, 1000},
    Increment = 25,
    Suffix = "Studs",
    CurrentValue = 300,
@@ -224,41 +213,19 @@ CombatTab:CreateSlider({
 })
 
 CombatTab:CreateSlider({
-   Name = "Under Distance (Depth)",
-   Range = {2, 30},
-   Increment = 1,
-   Suffix = "Studs Below",
-   CurrentValue = 8,
-   Flag = "UnderDepthSlider",
+   Name = "TP Refresh Speed (Seconds)",
+   Range = {0.1, 1.0},
+   Increment = 0.05,
+   Suffix = "s",
+   CurrentValue = 0.3,
+   Flag = "TPSpeedSlider",
    Callback = function(Value)
-      getgenv().BringMobsConfig.UnderDistance = Value
+      getgenv().BringMobsConfig.TeleportInterval = Value
    end,
 })
-
-CombatTab:CreateSection("Safety & Physics")
-
-CombatTab:CreateToggle({
-   Name = "Disable Mob Collisions (Anti-Fling)",
-   CurrentValue = true,
-   Flag = "AntiFlingToggle",
-   Callback = function(Value)
-      getgenv().BringMobsConfig.DisableCollision = Value
-   end,
-})
-
-CombatTab:CreateToggle({
-   Name = "Freeze Mob Movement",
-   CurrentValue = false,
-   Flag = "FreezeMobsToggle",
-   Callback = function(Value)
-      getgenv().BringMobsConfig.FreezeHumanoids = Value
-   end,
-})
-
-CombatTab:CreateSection("Filters & Target Folders")
 
 CombatTab:CreateInput({
-   Name = "Custom Folder Name (Optional)",
+   Name = "Custom Workspace Folder",
    PlaceholderText = "e.g., Mobs, Enemies (Leave empty for Workspace)",
    RemoveTextOnFocusLost = false,
    Callback = function(Text)
@@ -266,36 +233,8 @@ CombatTab:CreateInput({
    end,
 })
 
-CombatTab:CreateInput({
-   Name = "Mob Whitelist (Comma Separated)",
-   PlaceholderText = "e.g., Goblin, Bandit, Zombie",
-   RemoveTextOnFocusLost = false,
-   Callback = function(Text)
-      local list = {}
-      for entry in string.gmatch(Text, "[^,]+") do
-          local trimmed = string.match(entry, "^%s*(.-)%s*$")
-          if trimmed ~= "" then table.insert(list, trimmed) end
-      end
-      getgenv().BringMobsConfig.Whitelist = list
-   end,
-})
-
-CombatTab:CreateInput({
-   Name = "Mob Blacklist (Comma Separated)",
-   PlaceholderText = "e.g., Boss, NPC",
-   RemoveTextOnFocusLost = false,
-   Callback = function(Text)
-      local list = {}
-      for entry in string.gmatch(Text, "[^,]+") do
-          local trimmed = string.match(entry, "^%s*(.-)%s*$")
-          if trimmed ~= "" then table.insert(list, trimmed) end
-      end
-      getgenv().BringMobsConfig.Blacklist = list
-   end,
-})
-
 Rayfield:Notify({
    Title = "Engine Loaded",
-   Content = "Universal Bring Mobs is ready to use!",
+   Content = "Instant Ground Drop Engine is active!",
    Duration = 4,
 })
