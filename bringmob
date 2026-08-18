@@ -1,6 +1,6 @@
 -- =====================================================================
--- ARENA AIR DROP & VOID FALL ENGINE + RAYFIELD (WITH UNLOAD FEATURE)
--- Teleports mobs off arena edges into mid-air so they fall and die
+-- MOB NOCLIP & VOID DROP ENGINE + RAYFIELD UI (WITH UNLOAD FEATURE)
+-- Applies continuous NoClip (Stepped loop) to force mobs through floor
 -- =====================================================================
 
 local Services = {
@@ -11,23 +11,18 @@ local Services = {
 
 local LocalPlayer = Services.Players.LocalPlayer
 
--- Config Matrix
+-- Configuration
 getgenv().BringMobsConfig = getgenv().BringMobsConfig or {
-    Enabled = false,                 -- Toggle state
-    BringDistance = 300,             -- Radius in studs to search for mobs
-    AirDropMode = true,              -- If true, bypasses floor raycast & drops in mid-air
-    ForwardOffset = 10,              -- Distance IN FRONT of player (push over edge)
-    HeightOffset = -2,               -- Vertical height relative to player (- values = lower)
-    SideOffset = 0,                  -- Left (-) or Right (+) offset
-    TeleportInterval = 0.25,         -- Pulse speed in seconds
+    NoclipEnabled = false,           -- Master NoClip Toggle
+    PushDownward = true,             -- Applies downward physics force
+    BringDistance = 300,             -- Radius in studs
     IgnorePlayers = true,            -- Ignore player characters
     CustomFolderName = "",           -- Target folder in Workspace
     Whitelist = {},                  -- Name whitelist
     Blacklist = {}                   -- Name blacklist
 }
 
-local BringLoopConnection = nil
-local lastTPTime = 0
+local NoclipLoopConnection = nil
 
 -- Multi-Mirror Rayfield Loader
 local Rayfield = nil
@@ -49,7 +44,7 @@ end
 
 if not Rayfield then return end
 
--- Validate Mob
+-- Validate Mob Function
 local function isValidMob(model)
     if not model or not model:IsA("Model") then return false end
 
@@ -69,7 +64,7 @@ local function isValidMob(model)
 
     local modelName = string.lower(model.Name)
 
-    -- Whitelist
+    -- Whitelist Check
     local whitelist = getgenv().BringMobsConfig.Whitelist
     if #whitelist > 0 then
         local matched = false
@@ -82,7 +77,7 @@ local function isValidMob(model)
         if not matched then return false end
     end
 
-    -- Blacklist
+    -- Blacklist Check
     local blacklist = getgenv().BringMobsConfig.Blacklist
     if #blacklist > 0 then
         for _, name in ipairs(blacklist) do
@@ -95,43 +90,13 @@ local function isValidMob(model)
     return true, rootPart, humanoid
 end
 
--- Target CFrame calculation
-local function getTargetCFrame(playerRoot)
-    if getgenv().BringMobsConfig.AirDropMode then
-        -- Calculate mid-air position relative to player's facing direction
-        -- -ForwardOffset moves the point in front of where your camera/character faces
-        return playerRoot.CFrame * CFrame.new(
-            getgenv().BringMobsConfig.SideOffset,
-            getgenv().BringMobsConfig.HeightOffset,
-            -getgenv().BringMobsConfig.ForwardOffset
-        )
-    else
-        -- Ground Raycast Fallback
-        local rayParams = RaycastParams.new()
-        rayParams.FilterType = Enum.RaycastFilterType.Exclude
-        rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
-
-        local rayResult = Services.Workspace:Raycast(playerRoot.Position, Vector3.new(0, -100, 0), rayParams)
-        if rayResult then
-            return CFrame.new(rayResult.Position + Vector3.new(0, 3, 0))
-        else
-            return CFrame.new(playerRoot.Position - Vector3.new(0, 5, 0))
-        end
-    end
-end
-
--- Teleport and drop logic
-local function processBringAndDrop()
-    if not getgenv().BringMobsConfig.Enabled then return end
-
-    if tick() - lastTPTime < getgenv().BringMobsConfig.TeleportInterval then return end
-    lastTPTime = tick()
+-- Process NoClip on Stepped (Executes BEFORE physics step)
+local function processMobNoclip()
+    if not getgenv().BringMobsConfig.NoclipEnabled then return end
 
     local character = LocalPlayer.Character
     local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
     if not playerRoot then return end
-
-    local targetCFrame = getTargetCFrame(playerRoot)
 
     local searchContainer = Services.Workspace
     if getgenv().BringMobsConfig.CustomFolderName ~= "" then
@@ -139,22 +104,21 @@ local function processBringAndDrop()
         if foundFolder then searchContainer = foundFolder end
     end
 
-    local function bringMob(mobModel, mobRoot)
+    local function applyNoclipToMob(mobModel, mobRoot)
         pcall(function()
             local dist = (mobRoot.Position - playerRoot.Position).Magnitude
             if dist <= getgenv().BringMobsConfig.BringDistance then
                 
-                -- Enable physics collision so gravity acts on them
-                mobRoot.CanCollide = true
+                -- Force CanCollide = false on ALL parts of the mob model
+                for _, part in ipairs(mobModel:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = false
+                    end
+                end
 
-                -- Apply strong downward velocity so they plummet immediately
-                mobRoot.AssemblyLinearVelocity = Vector3.new(0, -60, 0)
-
-                -- Pivot model to target mid-air location
-                if mobModel.PrimaryPart then
-                    mobModel:PivotTo(targetCFrame)
-                else
-                    mobRoot.CFrame = targetCFrame
+                -- Optional downward force to accelerate falling through floor
+                if getgenv().BringMobsConfig.PushDownward then
+                    mobRoot.AssemblyLinearVelocity = Vector3.new(0, -50, 0)
                 end
             end
         end)
@@ -163,28 +127,30 @@ local function processBringAndDrop()
     for _, obj in ipairs(searchContainer:GetChildren()) do
         local valid, mobRoot = isValidMob(obj)
         if valid then
-            bringMob(obj, mobRoot)
+            applyNoclipToMob(obj, mobRoot)
         elseif obj:IsA("Folder") then
             for _, nestedObj in ipairs(obj:GetChildren()) do
                 local nestedValid, nestedRoot = isValidMob(nestedObj)
                 if nestedValid then
-                    bringMob(nestedObj, nestedRoot)
+                    applyNoclipToMob(nestedObj, nestedRoot)
                 end
             end
         end
     end
 end
 
-local function setEngineState(state)
-    getgenv().BringMobsConfig.Enabled = state
+-- Toggle Connection Engine
+local function setNoclipState(state)
+    getgenv().BringMobsConfig.NoclipEnabled = state
 
-    if BringLoopConnection then
-        BringLoopConnection:Disconnect()
-        BringLoopConnection = nil
+    if NoclipLoopConnection then
+        NoclipLoopConnection:Disconnect()
+        NoclipLoopConnection = nil
     end
 
     if state then
-        BringLoopConnection = Services.RunService.Heartbeat:Connect(processBringAndDrop)
+        -- MUST use Stepped so collision state is overridden right before physics step
+        NoclipLoopConnection = Services.RunService.Stepped:Connect(processMobNoclip)
     end
 end
 
@@ -192,7 +158,7 @@ end
 -- Rayfield UI Setup
 -- ---------------------------------------------------------------------
 local Window = Rayfield:CreateWindow({
-   Name = "Arena Air Drop Engine",
+   Name = "Mob NoClip Engine",
    LoadingTitle = "Loading Engine...",
    LoadingSubtitle = "by Keith",
    ConfigurationSaving = { Enabled = false },
@@ -200,56 +166,30 @@ local Window = Rayfield:CreateWindow({
    KeySystem = false
 })
 
-local CombatTab = Window:CreateTab("Bring & Drop", 4483362458)
+local CombatTab = Window:CreateTab("Mob NoClip", 4483362458)
 
 CombatTab:CreateSection("Main Controls")
 
 CombatTab:CreateToggle({
-   Name = "Enable Air Drop / Void Fall",
+   Name = "Enable Mob NoClip (Fall Through Map)",
    CurrentValue = false,
-   Flag = "AirDropToggle",
+   Flag = "MobNoclipToggle",
    Callback = function(Value)
-      setEngineState(Value)
+      setNoclipState(Value)
    end,
 })
 
 CombatTab:CreateToggle({
-   Name = "Air Drop Mode (Bypass Floor Lock)",
+   Name = "Push Downward Velocity",
    CurrentValue = true,
-   Flag = "AirDropModeToggle",
+   Flag = "PushDownwardToggle",
    Callback = function(Value)
-      getgenv().BringMobsConfig.AirDropMode = Value
-   end,
-})
-
-CombatTab:CreateSection("Drop Position Offsets")
-
-CombatTab:CreateSlider({
-   Name = "Forward Distance (In Front of You)",
-   Range = {0, 50},
-   Increment = 1,
-   Suffix = "Studs",
-   CurrentValue = 10,
-   Flag = "ForwardOffsetSlider",
-   Callback = function(Value)
-      getgenv().BringMobsConfig.ForwardOffset = Value
+      getgenv().BringMobsConfig.PushDownward = Value
    end,
 })
 
 CombatTab:CreateSlider({
-   Name = "Height Offset",
-   Range = {-20, 20},
-   Increment = 1,
-   Suffix = "Studs",
-   CurrentValue = -2,
-   Flag = "HeightOffsetSlider",
-   Callback = function(Value)
-      getgenv().BringMobsConfig.HeightOffset = Value
-   end,
-})
-
-CombatTab:CreateSlider({
-   Name = "Scan Radius",
+   Name = "Scan Radius (Studs)",
    Range = {50, 1000},
    Increment = 25,
    Suffix = "Studs",
@@ -274,7 +214,7 @@ CombatTab:CreateInput({
 CombatTab:CreateButton({
    Name = "Unload / Destroy Script",
    Callback = function()
-      setEngineState(false)
+      setNoclipState(false)
       Rayfield:Notify({
          Title = "Script Unloaded",
          Content = "Cleaned up background loops & destroyed UI.",
@@ -287,6 +227,6 @@ CombatTab:CreateButton({
 
 Rayfield:Notify({
    Title = "Engine Loaded",
-   Content = "Air Drop / Arena Edge Engine is active!",
+   Content = "Mob NoClip Engine is ready!",
    Duration = 4,
 })
