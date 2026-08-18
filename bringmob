@@ -1,34 +1,276 @@
-local CombatTab = Window:CreateTab("Combat", 4483362458)
+-- =====================================================================
+-- UNIVERSAL BRING MOBS + RAYFIELD UI ENGINE
+-- Compatible with Solara, Wave, Xeno, Celery, Delta, Codex, etc.
+-- =====================================================================
+
+local Services = {
+    Players = game:GetService("Players"),
+    RunService = game:GetService("RunService"),
+    Workspace = game:GetService("Workspace")
+}
+
+local LocalPlayer = Services.Players.LocalPlayer
+
+-- ---------------------------------------------------------------------
+-- Configuration State
+-- ---------------------------------------------------------------------
+getgenv().BringMobsConfig = getgenv().BringMobsConfig or {
+    Enabled = false,                 -- Master Toggle
+    BringDistance = 300,             -- Radius in studs
+    UnderDistance = 8,               -- Depth below character in studs
+    DisableCollision = true,         -- Prevents character flinging
+    FreezeHumanoids = false,         -- Stops mob walk animations/movement
+    IgnorePlayers = true,            -- Prevents targeting player characters
+    CustomFolderName = "",           -- Optional folder filter in Workspace
+    Whitelist = {},                  -- Name whitelist (comma-separated via UI)
+    Blacklist = {}                   -- Name blacklist (comma-separated via UI)
+}
+
+local BringLoopConnection = nil
+
+-- ---------------------------------------------------------------------
+-- Core Detection & Teleport Engine
+-- ---------------------------------------------------------------------
+local function isValidMob(model)
+    if not model or not model:IsA("Model") then return false end
+
+    -- Ignore players
+    if getgenv().BringMobsConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
+        return false
+    end
+
+    -- Validate Humanoid & Health
+    local humanoid = model:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+
+    -- Identify Root Part
+    local rootPart = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
+    if not rootPart then
+        return false
+    end
+
+    local modelName = string.lower(model.Name)
+
+    -- Whitelist Check
+    local whitelist = getgenv().BringMobsConfig.Whitelist
+    if #whitelist > 0 then
+        local matched = false
+        for _, name in ipairs(whitelist) do
+            if string.find(modelName, string.lower(name)) then
+                matched = true
+                break
+            end
+        end
+        if not matched then return false end
+    end
+
+    -- Blacklist Check
+    local blacklist = getgenv().BringMobsConfig.Blacklist
+    if #blacklist > 0 then
+        for _, name in ipairs(blacklist) do
+            if string.find(modelName, string.lower(name)) then
+                return false
+            end
+        end
+    end
+
+    return true, rootPart, humanoid
+end
+
+local function applyBringUnder(mobModel, mobRoot, humanoid, targetCFrame, playerPosition)
+    local dist = (mobRoot.Position - playerPosition).Magnitude
+    if dist <= getgenv().BringMobsConfig.BringDistance then
+        
+        -- Disable Collision to prevent player flinging
+        if getgenv().BringMobsConfig.DisableCollision then
+            for _, part in ipairs(mobModel:GetChildren()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+
+        -- Reset velocity & apply slight downforce for clean drop
+        mobRoot.AssemblyLinearVelocity = Vector3.new(0, -5, 0)
+        mobRoot.AssemblyAngularVelocity = Vector3.zero
+
+        -- Freeze Humanoid if enabled
+        if getgenv().BringMobsConfig.FreezeHumanoids and humanoid then
+            humanoid.WalkSpeed = 0
+            humanoid.PlatformStand = true
+        end
+
+        -- Position directly below player
+        mobRoot.CFrame = targetCFrame
+    end
+end
+
+local function processBringMobs()
+    if not getgenv().BringMobsConfig.Enabled then return end
+
+    local character = LocalPlayer.Character
+    local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
+    if not playerRoot then return end
+
+    local playerPos = playerRoot.Position
+    local targetPosition = playerPos - Vector3.new(0, getgenv().BringMobsConfig.UnderDistance, 0)
+    local targetCFrame = CFrame.new(targetPosition)
+
+    -- Determine Search Root
+    local searchContainer = Services.Workspace
+    local customFolderName = getgenv().BringMobsConfig.CustomFolderName
+    if customFolderName ~= "" then
+        local foundFolder = Services.Workspace:FindFirstChild(customFolderName)
+        if foundFolder then searchContainer = foundFolder end
+    end
+
+    -- Iterate workspace / target folder
+    for _, obj in ipairs(searchContainer:GetChildren()) do
+        local valid, mobRoot, humanoid = isValidMob(obj)
+        if valid then
+            applyBringUnder(obj, mobRoot, humanoid, targetCFrame, playerPos)
+        elseif obj:IsA("Folder") then
+            for _, nestedObj in ipairs(obj:GetChildren()) do
+                local nestedValid, nestedRoot, nestedHum = isValidMob(nestedObj)
+                if nestedValid then
+                    applyBringUnder(nestedObj, nestedRoot, nestedHum, targetCFrame, playerPos)
+                end
+            end
+        end
+    end
+end
+
+local function setEngineState(state)
+    getgenv().BringMobsConfig.Enabled = state
+
+    if BringLoopConnection then
+        BringLoopConnection:Disconnect()
+        BringLoopConnection = nil
+    end
+
+    if state then
+        BringLoopConnection = Services.RunService.Heartbeat:Connect(processBringMobs)
+    end
+end
+
+-- ---------------------------------------------------------------------
+-- Rayfield UI Initialization
+-- ---------------------------------------------------------------------
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local Window = Rayfield:CreateWindow({
+   Name = "Universal Combat Engine",
+   LoadingTitle = "Loading Mobs Engine...",
+   LoadingSubtitle = "by Keith",
+   ConfigurationSaving = {
+      Enabled = true,
+      FolderName = "BringMobsHub",
+      FileName = "Settings"
+   },
+   Discord = { Enabled = false },
+   KeySystem = false
+})
+
+local CombatTab = Window:CreateTab("Bring Mobs", 4483362458)
+
+CombatTab:CreateSection("Main Controls")
 
 CombatTab:CreateToggle({
    Name = "Bring Mobs Under Player",
    CurrentValue = false,
    Flag = "BringUnderToggle",
    Callback = function(Value)
-      getgenv().ToggleBringUnder(Value)
+      setEngineState(Value)
+   end,
+})
+
+CombatTab:CreateSlider({
+   Name = "Scan Radius (Studs)",
+   Range = {50, 1500},
+   Increment = 25,
+   Suffix = "Studs",
+   CurrentValue = 300,
+   Flag = "ScanRadiusSlider",
+   Callback = function(Value)
+      getgenv().BringMobsConfig.BringDistance = Value
    end,
 })
 
 CombatTab:CreateSlider({
    Name = "Under Distance (Depth)",
-   Range = {2, 25},
+   Range = {2, 30},
    Increment = 1,
    Suffix = "Studs Below",
    CurrentValue = 8,
-   Flag = "UnderDistanceSlider",
+   Flag = "UnderDepthSlider",
    Callback = function(Value)
-      getgenv().BringUnderConfig.UnderDistance = Value
+      getgenv().BringMobsConfig.UnderDistance = Value
    end,
 })
 
-CombatTab:CreateSlider({
-   Name = "Scan Radius",
-   Range = {50, 1000},
-   Increment = 25,
-   Suffix = "Studs",
-   CurrentValue = 300,
-   Flag = "BringRadiusSlider",
+CombatTab:CreateSection("Safety & Physics")
+
+CombatTab:CreateToggle({
+   Name = "Disable Mob Collisions (Anti-Fling)",
+   CurrentValue = true,
+   Flag = "AntiFlingToggle",
    Callback = function(Value)
-      getgenv().BringUnderConfig.BringDistance = Value
+      getgenv().BringMobsConfig.DisableCollision = Value
    end,
+})
+
+CombatTab:CreateToggle({
+   Name = "Freeze Mob Movement",
+   CurrentValue = false,
+   Flag = "FreezeMobsToggle",
+   Callback = function(Value)
+      getgenv().BringMobsConfig.FreezeHumanoids = Value
+   end,
+})
+
+CombatTab:CreateSection("Filters & Target Folders")
+
+CombatTab:CreateInput({
+   Name = "Custom Folder Name (Optional)",
+   PlaceholderText = "e.g., Mobs, Enemies (Leave empty for Workspace)",
+   RemoveTextOnFocusLost = false,
+   Callback = function(Text)
+      getgenv().BringMobsConfig.CustomFolderName = string.gsub(Text, "%s+", "")
+   end,
+})
+
+CombatTab:CreateInput({
+   Name = "Mob Whitelist (Comma Separated)",
+   PlaceholderText = "e.g., Goblin, Bandit, Zombie",
+   RemoveTextOnFocusLost = false,
+   Callback = function(Text)
+      local list = {}
+      for entry in string.gmatch(Text, "[^,]+") do
+          local trimmed = string.match(entry, "^%s*(.-)%s*$")
+          if trimmed ~= "" then table.insert(list, trimmed) end
+      end
+      getgenv().BringMobsConfig.Whitelist = list
+   end,
+})
+
+CombatTab:CreateInput({
+   Name = "Mob Blacklist (Comma Separated)",
+   PlaceholderText = "e.g., Boss, NPC",
+   RemoveTextOnFocusLost = false,
+   Callback = function(Text)
+      local list = {}
+      for entry in string.gmatch(Text, "[^,]+") do
+          local trimmed = string.match(entry, "^%s*(.-)%s*$")
+          if trimmed ~= "" then table.insert(list, trimmed) end
+      end
+      getgenv().BringMobsConfig.Blacklist = list
+   end,
+})
+
+Rayfield:Notify({
+   Title = "Engine Loaded",
+   Content = "Universal Bring Mobs is ready to use!",
+   Duration = 4,
 })
