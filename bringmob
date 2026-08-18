@@ -1,5 +1,6 @@
 -- =====================================================================
--- INSTANT GROUND DROP & TP MOBS ENGINE + RAYFIELD (WITH UNLOAD FEATURE)
+-- ARENA AIR DROP & VOID FALL ENGINE + RAYFIELD (WITH UNLOAD FEATURE)
+-- Teleports mobs off arena edges into mid-air so they fall and die
 -- =====================================================================
 
 local Services = {
@@ -13,9 +14,12 @@ local LocalPlayer = Services.Players.LocalPlayer
 -- Config Matrix
 getgenv().BringMobsConfig = getgenv().BringMobsConfig or {
     Enabled = false,                 -- Toggle state
-    BringDistance = 300,             -- Radius in studs
-    UnderOffset = 3,                 -- Height above ground to drop them from
-    TeleportInterval = 0.3,          -- TP pulse frequency (seconds)
+    BringDistance = 300,             -- Radius in studs to search for mobs
+    AirDropMode = true,              -- If true, bypasses floor raycast & drops in mid-air
+    ForwardOffset = 10,              -- Distance IN FRONT of player (push over edge)
+    HeightOffset = -2,               -- Vertical height relative to player (- values = lower)
+    SideOffset = 0,                  -- Left (-) or Right (+) offset
+    TeleportInterval = 0.25,         -- Pulse speed in seconds
     IgnorePlayers = true,            -- Ignore player characters
     CustomFolderName = "",           -- Target folder in Workspace
     Whitelist = {},                  -- Name whitelist
@@ -91,18 +95,28 @@ local function isValidMob(model)
     return true, rootPart, humanoid
 end
 
--- Raycast ground height directly below player
-local function getGroundTargetCFrame(playerRoot)
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-    rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
-
-    local rayResult = Services.Workspace:Raycast(playerRoot.Position, Vector3.new(0, -100, 0), rayParams)
-    
-    if rayResult then
-        return CFrame.new(rayResult.Position + Vector3.new(0, getgenv().BringMobsConfig.UnderOffset, 0))
+-- Target CFrame calculation
+local function getTargetCFrame(playerRoot)
+    if getgenv().BringMobsConfig.AirDropMode then
+        -- Calculate mid-air position relative to player's facing direction
+        -- -ForwardOffset moves the point in front of where your camera/character faces
+        return playerRoot.CFrame * CFrame.new(
+            getgenv().BringMobsConfig.SideOffset,
+            getgenv().BringMobsConfig.HeightOffset,
+            -getgenv().BringMobsConfig.ForwardOffset
+        )
     else
-        return CFrame.new(playerRoot.Position - Vector3.new(0, 5, 0))
+        -- Ground Raycast Fallback
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
+
+        local rayResult = Services.Workspace:Raycast(playerRoot.Position, Vector3.new(0, -100, 0), rayParams)
+        if rayResult then
+            return CFrame.new(rayResult.Position + Vector3.new(0, 3, 0))
+        else
+            return CFrame.new(playerRoot.Position - Vector3.new(0, 5, 0))
+        end
     end
 end
 
@@ -117,7 +131,7 @@ local function processBringAndDrop()
     local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
     if not playerRoot then return end
 
-    local targetDropCFrame = getGroundTargetCFrame(playerRoot)
+    local targetCFrame = getTargetCFrame(playerRoot)
 
     local searchContainer = Services.Workspace
     if getgenv().BringMobsConfig.CustomFolderName ~= "" then
@@ -129,13 +143,18 @@ local function processBringAndDrop()
         pcall(function()
             local dist = (mobRoot.Position - playerRoot.Position).Magnitude
             if dist <= getgenv().BringMobsConfig.BringDistance then
+                
+                -- Enable physics collision so gravity acts on them
                 mobRoot.CanCollide = true
-                mobRoot.AssemblyLinearVelocity = Vector3.new(0, -20, 0)
 
+                -- Apply strong downward velocity so they plummet immediately
+                mobRoot.AssemblyLinearVelocity = Vector3.new(0, -60, 0)
+
+                -- Pivot model to target mid-air location
                 if mobModel.PrimaryPart then
-                    mobModel:PivotTo(targetDropCFrame)
+                    mobModel:PivotTo(targetCFrame)
                 else
-                    mobRoot.CFrame = targetDropCFrame
+                    mobRoot.CFrame = targetCFrame
                 end
             end
         end)
@@ -173,7 +192,7 @@ end
 -- Rayfield UI Setup
 -- ---------------------------------------------------------------------
 local Window = Rayfield:CreateWindow({
-   Name = "Universal Drop Mobs Engine",
+   Name = "Arena Air Drop Engine",
    LoadingTitle = "Loading Engine...",
    LoadingSubtitle = "by Keith",
    ConfigurationSaving = { Enabled = false },
@@ -181,21 +200,56 @@ local Window = Rayfield:CreateWindow({
    KeySystem = false
 })
 
-local CombatTab = Window:CreateTab("Bring Mobs", 4483362458)
+local CombatTab = Window:CreateTab("Bring & Drop", 4483362458)
 
 CombatTab:CreateSection("Main Controls")
 
 CombatTab:CreateToggle({
-   Name = "Teleport & Drop Mobs Under Player",
+   Name = "Enable Air Drop / Void Fall",
    CurrentValue = false,
-   Flag = "BringUnderToggle",
+   Flag = "AirDropToggle",
    Callback = function(Value)
       setEngineState(Value)
    end,
 })
 
+CombatTab:CreateToggle({
+   Name = "Air Drop Mode (Bypass Floor Lock)",
+   CurrentValue = true,
+   Flag = "AirDropModeToggle",
+   Callback = function(Value)
+      getgenv().BringMobsConfig.AirDropMode = Value
+   end,
+})
+
+CombatTab:CreateSection("Drop Position Offsets")
+
 CombatTab:CreateSlider({
-   Name = "Scan Radius (Studs)",
+   Name = "Forward Distance (In Front of You)",
+   Range = {0, 50},
+   Increment = 1,
+   Suffix = "Studs",
+   CurrentValue = 10,
+   Flag = "ForwardOffsetSlider",
+   Callback = function(Value)
+      getgenv().BringMobsConfig.ForwardOffset = Value
+   end,
+})
+
+CombatTab:CreateSlider({
+   Name = "Height Offset",
+   Range = {-20, 20},
+   Increment = 1,
+   Suffix = "Studs",
+   CurrentValue = -2,
+   Flag = "HeightOffsetSlider",
+   Callback = function(Value)
+      getgenv().BringMobsConfig.HeightOffset = Value
+   end,
+})
+
+CombatTab:CreateSlider({
+   Name = "Scan Radius",
    Range = {50, 1000},
    Increment = 25,
    Suffix = "Studs",
@@ -206,17 +260,7 @@ CombatTab:CreateSlider({
    end,
 })
 
-CombatTab:CreateSlider({
-   Name = "TP Refresh Speed (Seconds)",
-   Range = {0.1, 1.0},
-   Increment = 0.05,
-   Suffix = "s",
-   CurrentValue = 0.3,
-   Flag = "TPSpeedSlider",
-   Callback = function(Value)
-      getgenv().BringMobsConfig.TeleportInterval = Value
-   end,
-})
+CombatTab:CreateSection("Target Filters & Unload")
 
 CombatTab:CreateInput({
    Name = "Custom Workspace Folder",
@@ -227,33 +271,22 @@ CombatTab:CreateInput({
    end,
 })
 
--- ---------------------------------------------------------------------
--- Unload & Cleanup Controls
--- ---------------------------------------------------------------------
-CombatTab:CreateSection("Script Settings")
-
 CombatTab:CreateButton({
    Name = "Unload / Destroy Script",
    Callback = function()
-      -- 1. Stop background loop connection
       setEngineState(false)
-
-      -- 2. Notify User
       Rayfield:Notify({
          Title = "Script Unloaded",
          Content = "Cleaned up background loops & destroyed UI.",
          Duration = 3,
       })
-
       task.wait(0.3)
-
-      -- 3. Destroy Rayfield UI Completely
       Rayfield:Destroy()
    end,
 })
 
 Rayfield:Notify({
    Title = "Engine Loaded",
-   Content = "Instant Ground Drop Engine is active!",
+   Content = "Air Drop / Arena Edge Engine is active!",
    Duration = 4,
 })
