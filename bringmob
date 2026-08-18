@@ -1,0 +1,34 @@
+local CombatTab = Window:CreateTab("Combat", 4483362458)
+
+CombatTab:CreateToggle({
+   Name = "Bring Mobs Under Player",
+   CurrentValue = false,
+   Flag = "BringUnderToggle",
+   Callback = function(Value)
+      getgenv().ToggleBringUnder(Value)
+   end,
+})
+
+CombatTab:CreateSlider({
+   Name = "Under Distance (Depth)",
+   Range = {2, 25},
+   Increment = 1,
+   Suffix = "Studs Below",
+   CurrentValue = 8,
+   Flag = "UnderDistanceSlider",
+   Callback = function(Value)
+      getgenv().BringUnderConfig.UnderDistance = Value
+   end,
+})
+
+CombatTab:CreateSlider({
+   Name = "Scan Radius",
+   Range = {50, 1000},
+   Increment = 25,
+   Suffix = "Studs",
+   CurrentValue = 300,
+   Flag = "BringRadiusSlider",
+   Callback = function(Value)
+      getgenv().BringUnderConfig.BringDistance = Value
+   end,
+})
