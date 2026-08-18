@@ -1,6 +1,6 @@
 -- =====================================================================
--- MOB NOCLIP & GROUND-UNLOCK ENGINE (LURE & FALL)
--- Disables Humanoid Ground-Snapping + Collision to force void falls
+-- ULTIMATE VOID DROP & WALL BYPASS ENGINE
+-- Combines HipHeight Sink, Outward Nudge, Waypoint Override & Spin Slip
 -- =====================================================================
 
 local Services = {
@@ -11,17 +11,18 @@ local Services = {
 
 local LocalPlayer = Services.Players.LocalPlayer
 
--- Config Matrix
-getgenv().MobNoclipConfig = getgenv().MobNoclipConfig or {
+-- Configuration
+getgenv().VoidDropConfig = getgenv().VoidDropConfig or {
     Enabled = false,                 -- Master Toggle
-    Distance = 300,                  -- Scan Radius
-    ForcePlatformStand = true,       -- Disables humanoid ground-snapping
-    ApplyVoidPush = true,            -- Subtle downward/outward push when lured
-    IgnorePlayers = true,            -- Ignore player characters
+    PushForce = 2.5,                 -- Studs shifted per frame
+    SinkDepth = -5,                  -- HipHeight offset to sink under wall bounds
+    DropRange = 350,                 -- Scan radius in studs
+    ApplySpinFling = true,           -- Rotational spin to slip along corners
+    IgnorePlayers = true,            -- Ignore real player models
     CustomFolderName = ""            -- Workspace folder override
 }
 
-local NoclipConnection = nil
+local HeartbeatConnection = nil
 
 -- Multi-Mirror Safe Rayfield Loader
 local Rayfield = nil
@@ -47,26 +48,22 @@ if not Rayfield then return end
 local function isValidMob(model)
     if not model or not model:IsA("Model") then return false end
 
-    if getgenv().MobNoclipConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
+    if getgenv().VoidDropConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
         return false
     end
 
     local humanoid = model:FindFirstChildOfClass("Humanoid")
-    if not humanoid or humanoid.Health <= 0 then
-        return false
-    end
+    if not humanoid or humanoid.Health <= 0 then return false end
 
     local rootPart = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
-    if not rootPart then
-        return false
-    end
+    if not rootPart then return false end
 
     return true, rootPart, humanoid
 end
 
--- Core Engine Phase Loop
-local function processMobNoclip()
-    if not getgenv().MobNoclipConfig.Enabled then return end
+-- Multi-Bypass Frame Processor
+local function processVoidDrop()
+    if not getgenv().VoidDropConfig.Enabled then return end
 
     local character = LocalPlayer.Character
     local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
@@ -75,17 +72,33 @@ local function processMobNoclip()
     local playerPos = playerRoot.Position
     local searchContainer = Services.Workspace
 
-    if getgenv().MobNoclipConfig.CustomFolderName ~= "" then
-        local folder = Services.Workspace:FindFirstChild(getgenv().MobNoclipConfig.CustomFolderName)
+    if getgenv().VoidDropConfig.CustomFolderName ~= "" then
+        local folder = Services.Workspace:FindFirstChild(getgenv().VoidDropConfig.CustomFolderName)
         if folder then searchContainer = folder end
     end
 
-    local function applyNoclipToModel(mobModel, mobRoot, humanoid)
+    local function applyBypassAndPush(mobModel, mobRoot, humanoid)
         pcall(function()
             local dist = (mobRoot.Position - playerPos).Magnitude
-            if dist <= getgenv().MobNoclipConfig.Distance then
+            if dist <= getgenv().VoidDropConfig.DropRange then
                 
-                -- 1. Strip all part collisions and query physics
+                -- 1. Sink HipHeight below floor/wall colliders
+                humanoid.HipHeight = getgenv().VoidDropConfig.SinkDepth
+
+                -- 2. Calculate outward vector pointing away from player
+                local pushDir = (mobRoot.Position - playerPos).Unit
+                if pushDir.Magnitude == 0 or pushDir ~= pushDir then
+                    pushDir = playerRoot.CFrame.LookVector
+                end
+
+                -- 3. Step CFrame past wall bounds incrementally
+                local targetPos = mobRoot.Position + (pushDir * getgenv().VoidDropConfig.PushForce)
+                mobRoot.CFrame = CFrame.new(targetPos, targetPos + pushDir)
+
+                -- 4. Spoof Humanoid pathfinding target out into the void
+                humanoid:MoveTo(mobRoot.Position + (pushDir * 100))
+
+                -- 5. Strip local part collision
                 for _, part in ipairs(mobModel:GetDescendants()) do
                     if part:IsA("BasePart") then
                         part.CanCollide = false
@@ -93,58 +106,57 @@ local function processMobNoclip()
                     end
                 end
 
-                -- 2. Break Humanoid Ground-Raycast Snapping
-                if getgenv().MobNoclipConfig.ForcePlatformStand then
-                    humanoid.PlatformStand = true
-                    humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-                end
+                -- 6. Unlock physics states and apply downward + outward velocity
+                humanoid.PlatformStand = true
+                humanoid:ChangeState(Enum.HumanoidStateType.Physics)
 
-                -- 3. Apply downward force so gravity takes over instantly
-                if getgenv().MobNoclipConfig.ApplyVoidPush then
-                    mobRoot.AssemblyLinearVelocity = Vector3.new(
-                        mobRoot.AssemblyLinearVelocity.X,
-                        -30,
-                        mobRoot.AssemblyLinearVelocity.Z
-                    )
+                if getgenv().VoidDropConfig.ApplySpinFling then
+                    mobRoot.AssemblyAngularVelocity = Vector3.new(0, 500, 0)
                 end
+                mobRoot.AssemblyLinearVelocity = (pushDir * 40) + Vector3.new(0, -60, 0)
             end
         end)
     end
 
-    -- Scan workspace
     for _, obj in ipairs(searchContainer:GetChildren()) do
         local valid, mobRoot, humanoid = isValidMob(obj)
         if valid then
-            applyNoclipToModel(obj, mobRoot, humanoid)
+            applyBypassAndPush(obj, mobRoot, humanoid)
         elseif obj:IsA("Folder") then
             for _, nestedObj in ipairs(obj:GetChildren()) do
                 local nestedValid, nestedRoot, nestedHumanoid = isValidMob(nestedObj)
                 if nestedValid then
-                    applyNoclipToModel(nestedObj, nestedRoot, nestedHumanoid)
+                    applyBypassAndPush(nestedObj, nestedRoot, nestedHumanoid)
                 end
             end
         end
     end
 end
 
--- Enable/Disable State Handler
-local function setNoclipState(state)
-    getgenv().MobNoclipConfig.Enabled = state
+-- Engine State Manager
+local function setEngineState(state)
+    getgenv().VoidDropConfig.Enabled = state
 
-    if NoclipConnection then
-        NoclipConnection:Disconnect()
-        NoclipConnection = nil
+    if HeartbeatConnection then
+        HeartbeatConnection:Disconnect()
+        HeartbeatConnection = nil
     end
 
     if state then
-        -- Runs every frame prior to physics step
-        NoclipConnection = Services.RunService.Stepped:Connect(processMobNoclip)
+        HeartbeatConnection = Services.RunService.Heartbeat:Connect(processVoidDrop)
     else
-        -- Restore PlatformStand on disable so mobs can walk again if needed
+        -- Restore mob states on disable
         pcall(function()
-            for _, obj in ipairs(Services.Workspace:GetChildren()) do
+            local searchContainer = Services.Workspace
+            if getgenv().VoidDropConfig.CustomFolderName ~= "" then
+                local folder = Services.Workspace:FindFirstChild(getgenv().VoidDropConfig.CustomFolderName)
+                if folder then searchContainer = folder end
+            end
+
+            for _, obj in ipairs(searchContainer:GetChildren()) do
                 local valid, _, humanoid = isValidMob(obj)
                 if valid and humanoid then
+                    humanoid.HipHeight = 2
                     humanoid.PlatformStand = false
                     humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
                 end
@@ -153,58 +165,71 @@ local function setNoclipState(state)
     end
 end
 
--- ---------------------------------------------------------------------
--- Rayfield UI Setup
--- ---------------------------------------------------------------------
+-- Rayfield Window Interface
 local Window = Rayfield:CreateWindow({
-   Name = "Mob Ground-Unlock & NoClip",
-   LoadingTitle = "Loading Engine...",
+   Name = "Ultimate Void Drop Engine",
+   LoadingTitle = "Loading Multi-Bypass Engine...",
    LoadingSubtitle = "by Keith",
    ConfigurationSaving = { Enabled = false },
    Discord = { Enabled = false },
    KeySystem = false
 })
 
-local MainTab = Window:CreateTab("Arena Fall", 4483362458)
+local MainTab = Window:CreateTab("Wall Bypass & Drop", 4483362458)
 
 MainTab:CreateSection("Main Controls")
 
 MainTab:CreateToggle({
-   Name = "Enable Mob NoClip & Ground Unlock",
+   Name = "Enable Multi-Bypass Void Drop",
    CurrentValue = false,
-   Flag = "MobNoclipToggle",
+   Flag = "VoidDropToggle",
    Callback = function(Value)
-      setNoclipState(Value)
-   end,
-})
-
-MainTab:CreateToggle({
-   Name = "Disable Ground Snapping (PlatformStand)",
-   CurrentValue = true,
-   Flag = "PlatformStandToggle",
-   Callback = function(Value)
-      getgenv().MobNoclipConfig.ForcePlatformStand = Value
-   end,
-})
-
-MainTab:CreateToggle({
-   Name = "Apply Downward Gravity Velocity",
-   CurrentValue = true,
-   Flag = "VoidPushToggle",
-   Callback = function(Value)
-      getgenv().MobNoclipConfig.ApplyVoidPush = Value
+      setEngineState(Value)
    end,
 })
 
 MainTab:CreateSlider({
-   Name = "Effect Range (Studs)",
+   Name = "Wall Push Speed (Studs/Frame)",
+   Range = {1, 10},
+   Increment = 0.5,
+   Suffix = "Studs",
+   CurrentValue = 2.5,
+   Flag = "PushForceSlider",
+   Callback = function(Value)
+      getgenv().VoidDropConfig.PushForce = Value
+   end,
+})
+
+MainTab:CreateSlider({
+   Name = "Wall Sink Depth (HipHeight)",
+   Range = {-10, 0},
+   Increment = 0.5,
+   Suffix = "Depth",
+   CurrentValue = -5,
+   Flag = "SinkDepthSlider",
+   Callback = function(Value)
+      getgenv().VoidDropConfig.SinkDepth = Value
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Enable Angular Spin Slip",
+   CurrentValue = true,
+   Flag = "SpinFlingToggle",
+   Callback = function(Value)
+      getgenv().VoidDropConfig.ApplySpinFling = Value
+   end,
+})
+
+MainTab:CreateSlider({
+   Name = "Scan Radius",
    Range = {50, 1000},
    Increment = 25,
    Suffix = "Studs",
-   CurrentValue = 300,
-   Flag = "DistanceSlider",
+   CurrentValue = 350,
+   Flag = "RadiusSlider",
    Callback = function(Value)
-      getgenv().MobNoclipConfig.Distance = Value
+      getgenv().VoidDropConfig.DropRange = Value
    end,
 })
 
@@ -215,7 +240,7 @@ MainTab:CreateInput({
    PlaceholderText = "e.g., Mobs, Enemies (Leave empty for Workspace)",
    RemoveTextOnFocusLost = false,
    Callback = function(Text)
-      getgenv().MobNoclipConfig.CustomFolderName = string.gsub(Text, "%s+", "")
+      getgenv().VoidDropConfig.CustomFolderName = string.gsub(Text, "%s+", "")
    end,
 })
 
@@ -224,10 +249,10 @@ MainTab:CreateSection("Script Controls")
 MainTab:CreateButton({
    Name = "Unload / Destroy Script",
    Callback = function()
-      setNoclipState(false)
+      setEngineState(false)
       Rayfield:Notify({
-         Title = "Script Unloaded",
-         Content = "Disabled connections & restored mob states.",
+         Title = "Engine Unloaded",
+         Content = "Restored mob states and closed UI.",
          Duration = 3,
       })
       task.wait(0.3)
@@ -236,7 +261,7 @@ MainTab:CreateButton({
 })
 
 Rayfield:Notify({
-   Title = "Engine Updated",
-   Content = "Ground-snapping bypass active!",
+   Title = "Ultimate Engine Loaded",
+   Content = "Toggle ON and lure mobs near the wall boundary!",
    Duration = 4,
 })
