@@ -1,6 +1,5 @@
 -- =====================================================================
--- UNIVERSAL BRING MOBS + RAYFIELD UI ENGINE
--- Compatible with Solara, Wave, Xeno, Celery, Delta, Codex, etc.
+-- UNIVERSAL BRING MOBS ENGINE + RAYFIELD UI (STABLE RECON EDITION)
 -- =====================================================================
 
 local Services = {
@@ -22,19 +21,47 @@ getgenv().BringMobsConfig = getgenv().BringMobsConfig or {
     FreezeHumanoids = false,         -- Stops mob walk animations/movement
     IgnorePlayers = true,            -- Prevents targeting player characters
     CustomFolderName = "",           -- Optional folder filter in Workspace
-    Whitelist = {},                  -- Name whitelist (comma-separated via UI)
-    Blacklist = {}                   -- Name blacklist (comma-separated via UI)
+    Whitelist = {},                  -- Name whitelist
+    Blacklist = {}                   -- Name blacklist
 }
 
 local BringLoopConnection = nil
 
 -- ---------------------------------------------------------------------
--- Core Detection & Teleport Engine
+-- Fail-Safe Rayfield Loader (Multi-Mirror Fallback)
+-- ---------------------------------------------------------------------
+local Rayfield = nil
+local rayfieldURLs = {
+    "https://raw.githubusercontent.com/shlexware/Rayfield/main/source",
+    "https://sirius.menu/rayfield",
+    "https://raw.githubusercontent.com/SiriusSoftwareLTD/Rayfield/main/source"
+}
+
+for _, url in ipairs(rayfieldURLs) do
+    local success, result = pcall(function()
+        return loadstring(game:HttpGet(url))()
+    end)
+    if success and result then
+        Rayfield = result
+        print("[SUCCESS]: Rayfield UI loaded successfully from " .. url)
+        break
+    else
+        warn("[WARNING]: Failed to load Rayfield from " .. url)
+    end
+end
+
+if not Rayfield then
+    error("[FATAL ERROR]: Could not load Rayfield UI library from any source! Check executor network settings.")
+    return
+end
+
+-- ---------------------------------------------------------------------
+-- Core Target Validation & Detection
 -- ---------------------------------------------------------------------
 local function isValidMob(model)
     if not model or not model:IsA("Model") then return false end
 
-    -- Ignore players
+    -- Ignore player characters
     if getgenv().BringMobsConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
         return false
     end
@@ -80,31 +107,33 @@ local function isValidMob(model)
 end
 
 local function applyBringUnder(mobModel, mobRoot, humanoid, targetCFrame, playerPosition)
-    local dist = (mobRoot.Position - playerPosition).Magnitude
-    if dist <= getgenv().BringMobsConfig.BringDistance then
-        
-        -- Disable Collision to prevent player flinging
-        if getgenv().BringMobsConfig.DisableCollision then
-            for _, part in ipairs(mobModel:GetChildren()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = false
+    pcall(function()
+        local dist = (mobRoot.Position - playerPosition).Magnitude
+        if dist <= getgenv().BringMobsConfig.BringDistance then
+            
+            -- Disable Collision to prevent player flinging
+            if getgenv().BringMobsConfig.DisableCollision then
+                for _, part in ipairs(mobModel:GetChildren()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = false
+                    end
                 end
             end
+
+            -- Reset velocity
+            mobRoot.AssemblyLinearVelocity = Vector3.new(0, -5, 0)
+            mobRoot.AssemblyAngularVelocity = Vector3.zero
+
+            -- Freeze Humanoid if enabled
+            if getgenv().BringMobsConfig.FreezeHumanoids and humanoid then
+                humanoid.WalkSpeed = 0
+                humanoid.PlatformStand = true
+            end
+
+            -- Position directly below player
+            mobRoot.CFrame = targetCFrame
         end
-
-        -- Reset velocity & apply slight downforce for clean drop
-        mobRoot.AssemblyLinearVelocity = Vector3.new(0, -5, 0)
-        mobRoot.AssemblyAngularVelocity = Vector3.zero
-
-        -- Freeze Humanoid if enabled
-        if getgenv().BringMobsConfig.FreezeHumanoids and humanoid then
-            humanoid.WalkSpeed = 0
-            humanoid.PlatformStand = true
-        end
-
-        -- Position directly below player
-        mobRoot.CFrame = targetCFrame
-    end
+    end)
 end
 
 local function processBringMobs()
@@ -126,7 +155,7 @@ local function processBringMobs()
         if foundFolder then searchContainer = foundFolder end
     end
 
-    -- Iterate workspace / target folder
+    -- Iterate workspace / target folder safely
     for _, obj in ipairs(searchContainer:GetChildren()) do
         local valid, mobRoot, humanoid = isValidMob(obj)
         if valid then
@@ -156,18 +185,14 @@ local function setEngineState(state)
 end
 
 -- ---------------------------------------------------------------------
--- Rayfield UI Initialization
+-- Rayfield UI Setup
 -- ---------------------------------------------------------------------
-local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-
 local Window = Rayfield:CreateWindow({
    Name = "Universal Combat Engine",
    LoadingTitle = "Loading Mobs Engine...",
    LoadingSubtitle = "by Keith",
    ConfigurationSaving = {
-      Enabled = true,
-      FolderName = "BringMobsHub",
-      FileName = "Settings"
+      Enabled = false
    },
    Discord = { Enabled = false },
    KeySystem = false
