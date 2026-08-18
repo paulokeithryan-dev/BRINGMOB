@@ -1,6 +1,6 @@
 -- =====================================================================
--- PURE MOB NOCLIP ENGINE (LURE & DROP EDITION)
--- Disables collisions on mobs every Stepped frame so they fall off edges
+-- MOB NOCLIP & GROUND-UNLOCK ENGINE (LURE & FALL)
+-- Disables Humanoid Ground-Snapping + Collision to force void falls
 -- =====================================================================
 
 local Services = {
@@ -11,12 +11,14 @@ local Services = {
 
 local LocalPlayer = Services.Players.LocalPlayer
 
--- Configuration Matrix
+-- Config Matrix
 getgenv().MobNoclipConfig = getgenv().MobNoclipConfig or {
-    Enabled = false,                 -- Toggle state
-    Distance = 300,                  -- Distance radius around player
+    Enabled = false,                 -- Master Toggle
+    Distance = 300,                  -- Scan Radius
+    ForcePlatformStand = true,       -- Disables humanoid ground-snapping
+    ApplyVoidPush = true,            -- Subtle downward/outward push when lured
     IgnorePlayers = true,            -- Ignore player characters
-    CustomFolderName = ""            -- Custom Workspace folder if mobs are stored separately
+    CustomFolderName = ""            -- Workspace folder override
 }
 
 local NoclipConnection = nil
@@ -45,7 +47,6 @@ if not Rayfield then return end
 local function isValidMob(model)
     if not model or not model:IsA("Model") then return false end
 
-    -- Do not target real players
     if getgenv().MobNoclipConfig.IgnorePlayers and Services.Players:GetPlayerFromCharacter(model) then
         return false
     end
@@ -60,10 +61,10 @@ local function isValidMob(model)
         return false
     end
 
-    return true, rootPart
+    return true, rootPart, humanoid
 end
 
--- Continuous NoClip Core Engine
+-- Core Engine Phase Loop
 local function processMobNoclip()
     if not getgenv().MobNoclipConfig.Enabled then return end
 
@@ -79,37 +80,54 @@ local function processMobNoclip()
         if folder then searchContainer = folder end
     end
 
-    local function applyNoclipToModel(mobModel, mobRoot)
+    local function applyNoclipToModel(mobModel, mobRoot, humanoid)
         pcall(function()
             local dist = (mobRoot.Position - playerPos).Magnitude
             if dist <= getgenv().MobNoclipConfig.Distance then
-                -- Disable collisions on ALL descendant parts of the mob
+                
+                -- 1. Strip all part collisions and query physics
                 for _, part in ipairs(mobModel:GetDescendants()) do
                     if part:IsA("BasePart") then
                         part.CanCollide = false
+                        part.CanTouch = false
                     end
+                end
+
+                -- 2. Break Humanoid Ground-Raycast Snapping
+                if getgenv().MobNoclipConfig.ForcePlatformStand then
+                    humanoid.PlatformStand = true
+                    humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+                end
+
+                -- 3. Apply downward force so gravity takes over instantly
+                if getgenv().MobNoclipConfig.ApplyVoidPush then
+                    mobRoot.AssemblyLinearVelocity = Vector3.new(
+                        mobRoot.AssemblyLinearVelocity.X,
+                        -30,
+                        mobRoot.AssemblyLinearVelocity.Z
+                    )
                 end
             end
         end)
     end
 
-    -- Process workspace objects
+    -- Scan workspace
     for _, obj in ipairs(searchContainer:GetChildren()) do
-        local valid, mobRoot = isValidMob(obj)
+        local valid, mobRoot, humanoid = isValidMob(obj)
         if valid then
-            applyNoclipToModel(obj, mobRoot)
+            applyNoclipToModel(obj, mobRoot, humanoid)
         elseif obj:IsA("Folder") then
             for _, nestedObj in ipairs(obj:GetChildren()) do
-                local nestedValid, nestedRoot = isValidMob(nestedObj)
+                local nestedValid, nestedRoot, nestedHumanoid = isValidMob(nestedObj)
                 if nestedValid then
-                    applyNoclipToModel(nestedObj, nestedRoot)
+                    applyNoclipToModel(nestedObj, nestedRoot, nestedHumanoid)
                 end
             end
         end
     end
 end
 
--- Enable / Disable Connection Handler
+-- Enable/Disable State Handler
 local function setNoclipState(state)
     getgenv().MobNoclipConfig.Enabled = state
 
@@ -119,8 +137,19 @@ local function setNoclipState(state)
     end
 
     if state then
-        -- RunService.Stepped runs right BEFORE physics calculation every frame
+        -- Runs every frame prior to physics step
         NoclipConnection = Services.RunService.Stepped:Connect(processMobNoclip)
+    else
+        -- Restore PlatformStand on disable so mobs can walk again if needed
+        pcall(function()
+            for _, obj in ipairs(Services.Workspace:GetChildren()) do
+                local valid, _, humanoid = isValidMob(obj)
+                if valid and humanoid then
+                    humanoid.PlatformStand = false
+                    humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+                end
+            end
+        end)
     end
 end
 
@@ -128,7 +157,7 @@ end
 -- Rayfield UI Setup
 -- ---------------------------------------------------------------------
 local Window = Rayfield:CreateWindow({
-   Name = "Mob NoClip Engine",
+   Name = "Mob Ground-Unlock & NoClip",
    LoadingTitle = "Loading Engine...",
    LoadingSubtitle = "by Keith",
    ConfigurationSaving = { Enabled = false },
@@ -136,12 +165,12 @@ local Window = Rayfield:CreateWindow({
    KeySystem = false
 })
 
-local MainTab = Window:CreateTab("Lure & Drop", 4483362458)
+local MainTab = Window:CreateTab("Arena Fall", 4483362458)
 
 MainTab:CreateSection("Main Controls")
 
 MainTab:CreateToggle({
-   Name = "Enable Mob NoClip",
+   Name = "Enable Mob NoClip & Ground Unlock",
    CurrentValue = false,
    Flag = "MobNoclipToggle",
    Callback = function(Value)
@@ -149,8 +178,26 @@ MainTab:CreateToggle({
    end,
 })
 
+MainTab:CreateToggle({
+   Name = "Disable Ground Snapping (PlatformStand)",
+   CurrentValue = true,
+   Flag = "PlatformStandToggle",
+   Callback = function(Value)
+      getgenv().MobNoclipConfig.ForcePlatformStand = Value
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Apply Downward Gravity Velocity",
+   CurrentValue = true,
+   Flag = "VoidPushToggle",
+   Callback = function(Value)
+      getgenv().MobNoclipConfig.ApplyVoidPush = Value
+   end,
+})
+
 MainTab:CreateSlider({
-   Name = "NoClip Range (Studs)",
+   Name = "Effect Range (Studs)",
    Range = {50, 1000},
    Increment = 25,
    Suffix = "Studs",
@@ -180,7 +227,7 @@ MainTab:CreateButton({
       setNoclipState(false)
       Rayfield:Notify({
          Title = "Script Unloaded",
-         Content = "Disabled NoClip connection & destroyed UI.",
+         Content = "Disabled connections & restored mob states.",
          Duration = 3,
       })
       task.wait(0.3)
@@ -189,7 +236,7 @@ MainTab:CreateButton({
 })
 
 Rayfield:Notify({
-   Title = "Mob NoClip Ready",
-   Content = "Turn ON 'Enable Mob NoClip' and lead mobs over the edge!",
+   Title = "Engine Updated",
+   Content = "Ground-snapping bypass active!",
    Duration = 4,
 })
